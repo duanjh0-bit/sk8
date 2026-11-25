@@ -1,5 +1,5 @@
 /**
- * SK8 云端双向同步（Upstash Redis REST + 本地离线兜底队列）
+ * SK8 云端双向同步（Upstash Redis REST + 非阻塞防抖批量队列 + 本地离线兜底）
  */
 
 import {
@@ -18,6 +18,13 @@ const STORE_AUTH = atob(
 const KEY = 'sk8_state';
 const CACHE_KEY = 'sk8_cached_state_v2';
 const PENDING_KEY = 'sk8_pending_ops_v2';
+
+let opSeq = 0;
+
+function nextOpId() {
+  opSeq += 1;
+  return `${Date.now()}_${opSeq}`;
+}
 
 export function isLocalOnlyMode() {
   try {
@@ -62,26 +69,32 @@ function savePendingOps(ops) {
   }
 }
 
-export function queuePendingOp(opRecord) {
-  const ops = getPendingOps().filter((item) => {
-    if (opRecord.op === 'setDone') {
+export function mergePendingOpList(existingOps, opRecord) {
+  const stamped = { ...opRecord, opId: opRecord.opId || nextOpId() };
+  const filtered = (existingOps || []).filter((item) => {
+    if (stamped.op === 'setDone') {
       return !(
         item.op === 'setDone' &&
-        item.dateKey === opRecord.dateKey &&
-        item.trickId === opRecord.trickId
+        item.dateKey === stamped.dateKey &&
+        item.trickId === stamped.trickId
       );
     }
-    if (opRecord.op === 'setRain') {
-      return !(item.op === 'setRain' && item.dateKey === opRecord.dateKey);
+    if (stamped.op === 'setRain') {
+      return !(item.op === 'setRain' && item.dateKey === stamped.dateKey);
     }
-    if (opRecord.op === 'selectNew') {
-      return !(item.op === 'selectNew' && item.dateKey === opRecord.dateKey);
+    if (stamped.op === 'selectNew') {
+      return !(item.op === 'selectNew' && item.dateKey === stamped.dateKey);
     }
     return true;
   });
-  ops.push(opRecord);
-  savePendingOps(ops);
-  return ops;
+  filtered.push(stamped);
+  return filtered;
+}
+
+export function queuePendingOp(opRecord) {
+  const next = mergePendingOpList(getPendingOps(), opRecord);
+  savePendingOps(next);
+  return next;
 }
 
 export function replayPendingOps(baseState, ops) {
@@ -101,6 +114,15 @@ export function replayPendingOps(baseState, ops) {
     }
   }
   return state;
+}
+
+export function isSameLogicalState(a, b) {
+  if (!a || !b) return false;
+  const strip = (s) => {
+    const { updatedAt, ...rest } = s;
+    return rest;
+  };
+  return JSON.stringify(strip(a)) === JSON.stringify(strip(b));
 }
 
 async function redisCmd(args) {
@@ -157,11 +179,25 @@ export async function syncPull(todayKey = toLocalDateKey()) {
     }
 
     if (pending.length > 0) {
+      const sentIds = new Set(pending.map((o) => o.opId));
       cloudState = replayPendingOps(cloudState, pending);
       cloudState = reconcileDailyPlan(cloudState, todayKey);
       cloudState.updatedAt = Date.now();
       await redisCmd(['SET', KEY, JSON.stringify(cloudState)]);
-      savePendingOps([]);
+      const remaining = getPendingOps().filter((o) => !sentIds.has(o.opId));
+      savePendingOps(remaining);
+      if (remaining.length > 0) {
+        cloudState = reconcileDailyPlan(
+          replayPendingOps(cloudState, remaining),
+          todayKey
+        );
+      }
+      saveCachedState(cloudState);
+      return {
+        state: cloudState,
+        synced: remaining.length === 0,
+        pendingCount: remaining.length,
+      };
     }
 
     saveCachedState(cloudState);
@@ -176,36 +212,50 @@ export async function syncPull(todayKey = toLocalDateKey()) {
   }
 }
 
-export async function syncPushOp(
-  optimisticState,
-  opRecord,
-  todayKey = toLocalDateKey()
-) {
-  const stamped = { ...optimisticState, updatedAt: Date.now() };
-  saveCachedState(stamped);
-
+export async function flushPendingOps(fallbackState, todayKey = toLocalDateKey()) {
   if (isLocalOnlyMode()) {
-    return { state: stamped, synced: true, pendingCount: 0 };
+    savePendingOps([]);
+    return { state: fallbackState, synced: true, pendingCount: 0 };
   }
 
-  const pending = queuePendingOp(opRecord);
+  const initialPending = getPendingOps();
+  if (initialPending.length === 0) {
+    return { state: fallbackState, synced: true, pendingCount: 0 };
+  }
 
   try {
     const raw = await redisCmd(['GET', KEY]);
-    let base = parseCloudPayload(raw, todayKey) || stamped;
-    base = replayPendingOps(base, pending);
+    const batch = getPendingOps();
+    const sentIds = new Set(batch.map((o) => o.opId));
+
+    let base = parseCloudPayload(raw, todayKey) || fallbackState;
+    base = replayPendingOps(base, batch);
     base = reconcileDailyPlan(base, todayKey);
     base.updatedAt = Date.now();
 
     await redisCmd(['SET', KEY, JSON.stringify(base)]);
-    savePendingOps([]);
-    saveCachedState(base);
-    return { state: base, synced: true, pendingCount: 0 };
+
+    const remaining = getPendingOps().filter((o) => !sentIds.has(o.opId));
+    savePendingOps(remaining);
+
+    const effective =
+      remaining.length > 0
+        ? reconcileDailyPlan(replayPendingOps(base, remaining), todayKey)
+        : base;
+    saveCachedState(effective);
+
+    return {
+      state: effective,
+      synced: true,
+      pendingCount: remaining.length,
+      needsFollowUp: remaining.length > 0,
+    };
   } catch {
     return {
-      state: stamped,
+      state: fallbackState,
       synced: false,
-      pendingCount: pending.length,
+      pendingCount: getPendingOps().length,
+      needsFollowUp: false,
     };
   }
 }

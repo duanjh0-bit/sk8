@@ -19,11 +19,16 @@ import {
   toLocalDateKey,
 } from './domain.js';
 import {
+  flushPendingOps,
   getPendingOps,
+  isSameLogicalState,
   loadCachedState,
+  queuePendingOp,
+  saveCachedState,
   syncPull,
-  syncPushOp,
 } from './cloud.js';
+
+const SYNC_DEBOUNCE_MS = 450;
 
 const ui = {
   tab: 'today', // 'today' | 'history'
@@ -35,7 +40,8 @@ const ui = {
     loadCachedState() || createInitialState(toLocalDateKey()),
     toLocalDateKey()
   ),
-  busy: false,
+  syncing: false,
+  flushTimer: null,
   syncStatus: '',
 };
 
@@ -394,6 +400,47 @@ function render() {
   renderStatus();
 }
 
+/* ---------------- 后台防抖批量同步（彻底不阻塞连续点击） ---------------- */
+
+function scheduleBackgroundSync() {
+  clearTimeout(ui.flushTimer);
+  ui.flushTimer = setTimeout(() => {
+    runBackgroundFlush();
+  }, SYNC_DEBOUNCE_MS);
+}
+
+async function runBackgroundFlush() {
+  if (ui.syncing) return;
+  if (getPendingOps().length === 0) return;
+
+  ui.syncing = true;
+  ui.syncStatus = '同步中…';
+  renderStatus();
+
+  const res = await flushPendingOps(ui.state, ui.todayKey);
+  ui.syncing = false;
+
+  const changed = !isSameLogicalState(ui.state, res.state);
+  ui.state = res.state;
+
+  if (res.synced) {
+    ui.syncStatus = res.pendingCount > 0 ? '同步中…' : '';
+  } else {
+    ui.syncStatus = `离线已暂存（待同步 ${res.pendingCount}）`;
+  }
+
+  if (changed) {
+    if (!dom.pickerModal.hidden) renderPickerBody();
+    render();
+  } else {
+    renderStatus();
+  }
+
+  if (res.needsFollowUp) {
+    scheduleBackgroundSync();
+  }
+}
+
 /* ---------------- 今日攻坚选招弹窗 ---------------- */
 
 function openPickerModal() {
@@ -458,10 +505,7 @@ function renderPickerBody() {
   document.getElementById('pickerDoneBtn').onclick = closePickerModal;
 }
 
-async function handleTogglePickNew(trickId) {
-  if (ui.busy) return;
-  ui.busy = true;
-
+function handleTogglePickNew(trickId) {
   const cur = new Set(ui.state.dailyLogs[ui.todayKey]?.selectedNewIds || []);
   if (cur.has(trickId)) {
     cur.delete(trickId);
@@ -469,26 +513,15 @@ async function handleTogglePickNew(trickId) {
     cur.add(trickId);
   }
   const nextIds = Array.from(cur);
-  const optimistic = setTodayNewSelection(ui.state, nextIds, ui.todayKey);
+  const nextState = setTodayNewSelection(ui.state, nextIds, ui.todayKey);
 
-  ui.state = optimistic;
-  ui.syncStatus = '同步中…';
+  ui.state = { ...nextState, updatedAt: Date.now() };
+  saveCachedState(ui.state);
+  queuePendingOp({ op: 'selectNew', dateKey: ui.todayKey, ids: nextIds });
+
   renderPickerBody();
   render();
-
-  const res = await syncPushOp(
-    optimistic,
-    { op: 'selectNew', dateKey: ui.todayKey, ids: nextIds },
-    ui.todayKey
-  );
-
-  ui.state = res.state;
-  ui.syncStatus = res.synced
-    ? ''
-    : `离线已暂存（待同步 ${res.pendingCount}）`;
-  ui.busy = false;
-  if (!dom.pickerModal.hidden) renderPickerBody();
-  render();
+  scheduleBackgroundSync();
 }
 
 function shiftMonth(delta) {
@@ -506,41 +539,29 @@ function shiftMonth(delta) {
   renderHistoryView();
 }
 
-async function handleToggle(trickId) {
-  if (ui.busy) return;
-  ui.busy = true;
-
-  const { state: optimisticState, event } = toggleTrickCompletion(
+function handleToggle(trickId) {
+  const { state: nextState, event } = toggleTrickCompletion(
     ui.state,
     trickId,
     ui.todayKey
   );
-  if (!event) {
-    ui.busy = false;
-    return;
-  }
+  if (!event) return;
 
   const wantDone = event.action === 'checked';
-  ui.state = optimisticState;
-  ui.syncStatus = '同步中…';
-  render();
+  ui.state = { ...nextState, updatedAt: Date.now() };
+  saveCachedState(ui.state);
+  queuePendingOp({
+    op: 'setDone',
+    dateKey: ui.todayKey,
+    trickId,
+    value: wantDone,
+  });
 
-  const res = await syncPushOp(
-    optimisticState,
-    { op: 'setDone', dateKey: ui.todayKey, trickId, value: wantDone },
-    ui.todayKey
-  );
-
-  ui.state = res.state;
-  ui.syncStatus = res.synced
-    ? ''
-    : `离线已暂存（待同步 ${res.pendingCount}）`;
-  ui.busy = false;
   render();
+  scheduleBackgroundSync();
 }
 
-async function handleRainToggle() {
-  if (ui.busy) return;
+function handleRainToggle() {
   const res = toggleRainRest(ui.state, ui.todayKey);
   if (!res.changed && res.reason === 'has_completions') {
     ui.syncStatus = '今日已有打卡记录';
@@ -548,23 +569,16 @@ async function handleRainToggle() {
     return;
   }
 
-  ui.busy = true;
-  ui.state = res.state;
-  ui.syncStatus = '同步中…';
-  render();
+  ui.state = { ...res.state, updatedAt: Date.now() };
+  saveCachedState(ui.state);
+  queuePendingOp({
+    op: 'setRain',
+    dateKey: ui.todayKey,
+    value: res.isRainRest,
+  });
 
-  const pushRes = await syncPushOp(
-    res.state,
-    { op: 'setRain', dateKey: ui.todayKey, value: res.isRainRest },
-    ui.todayKey
-  );
-
-  ui.state = pushRes.state;
-  ui.syncStatus = pushRes.synced
-    ? ''
-    : `离线已暂存（待同步 ${pushRes.pendingCount}）`;
-  ui.busy = false;
   render();
+  scheduleBackgroundSync();
 }
 
 async function handleRefresh(silent = false) {
@@ -577,10 +591,12 @@ async function handleRefresh(silent = false) {
     ui.calMonth = now.getMonth() + 1;
   }
 
+  clearTimeout(ui.flushTimer);
   const refreshBtn = document.getElementById('refreshBtn');
   if (!silent && refreshBtn) refreshBtn.classList.add('spinning');
 
   const res = await syncPull(ui.todayKey);
+  const changed = !isSameLogicalState(ui.state, res.state);
   ui.state = res.state;
   if (res.synced) {
     ui.syncStatus = '';
@@ -593,7 +609,12 @@ async function handleRefresh(silent = false) {
   }
 
   if (refreshBtn) refreshBtn.classList.remove('spinning');
-  render();
+  if (changed) {
+    if (!dom.pickerModal.hidden) renderPickerBody();
+    render();
+  } else {
+    renderStatus();
+  }
 }
 
 dom.pickerCloseBtn.onclick = closePickerModal;
@@ -608,6 +629,9 @@ if ('serviceWorker' in navigator) {
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'visible') {
     handleRefresh(true);
+  } else if (getPendingOps().length > 0) {
+    clearTimeout(ui.flushTimer);
+    runBackgroundFlush();
   }
 });
 
