@@ -205,14 +205,10 @@ function computeIsFullComplete(tricks, log) {
   const completedSet = new Set(log.completedIds);
   if (completedSet.size === 0) return false;
 
-  const masteredIds = tricks
-    .filter((t) => t.tier === TIERS.MASTERED)
-    .map((t) => t.id);
-
+  // 熟练老动作为静态展示列表，满勤判定只需勾完今日攻坚新招 + 不稳定老招
   const requiredIds = [
     ...log.selectedNewIds,
     ...log.assignedUnstableIds,
-    ...masteredIds,
   ];
 
   if (requiredIds.length === 0) {
@@ -915,14 +911,13 @@ export function renderMarkdownLog(inputState, todayKey = toLocalDateKey()) {
     }
   }
 
-  lines.push('', '## 熟练老动作');
+  lines.push('', '## 熟练老动作（静态列表）');
   const masteredList = state.tricks.filter((t) => t.tier === TIERS.MASTERED);
   if (masteredList.length === 0) {
     lines.push('- （暂无）');
   } else {
     for (const t of masteredList) {
-      const box = completedSet.has(t.id) ? '[x]' : '[ ]';
-      lines.push(`- ${box} ${t.name}`);
+      lines.push(`- ${t.name}`);
     }
   }
 

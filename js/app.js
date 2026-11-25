@@ -139,7 +139,6 @@ function renderTodayView() {
 
   const newDone = newTricks.filter((t) => completedSet.has(t.id)).length;
   const unstableDone = unstableTricks.filter((t) => completedSet.has(t.id)).length;
-  const masteredDone = masteredTricks.filter((t) => completedSet.has(t.id)).length;
 
   const newHtml =
     newTricks.length > 0
@@ -153,21 +152,12 @@ function renderTodayView() {
 
   const masteredHtml =
     masteredTricks.length > 0
-      ? `<div class="mastered-grid">${masteredTricks
-          .map((t) => {
-            const done = completedSet.has(t.id);
-            return `
-              <button
-                type="button"
-                class="mastered-tile ${done ? 'is-done' : ''}"
-                data-toggle-id="${escapeHtml(t.id)}"
-              >
-                <span class="check-circle mastered">${done ? checkIconSvg() : ''}</span>
-                <span class="mastered-name">${escapeHtml(t.name)}</span>
-              </button>
-            `;
-          })
-          .join('')}</div>`
+      ? `<div class="card-panel mastered-static-card"><div class="mastered-chip-list">${masteredTricks
+          .map(
+            (t) =>
+              `<span class="mastered-static-chip">${escapeHtml(t.name)}</span>`
+          )
+          .join('')}</div></div>`
       : `<div class="empty-card">暂无熟练老动作</div>`;
 
   dom.mainContent.innerHTML = `
@@ -193,7 +183,7 @@ function renderTodayView() {
       <div class="section-header">
         <span class="tier-dot mastered"></span>
         <h2 class="section-title">熟练老动作</h2>
-        <span class="section-count">${masteredDone}/${masteredTricks.length}</span>
+        <span class="section-count">${masteredTricks.length}</span>
       </div>
       ${masteredHtml}
     </section>
