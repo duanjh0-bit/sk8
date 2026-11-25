@@ -6,6 +6,7 @@ import {
   createInitialState,
   reconcileDailyPlan,
   setRainRest,
+  setTodayNewSelection,
   setTrickCompletion,
   toLocalDateKey,
 } from './domain.js';
@@ -15,8 +16,8 @@ const STORE_AUTH = atob(
   'Z1FBQUFBQUFBZ3dwQUFJZ2NESm1ZVE01TWpnd1pXUTJOR0UwT0dNeE9UWXpOalUwT0Rnd1pXTmtaV0k0TUE='
 );
 const KEY = 'sk8_state';
-const CACHE_KEY = 'sk8_cached_state_v1';
-const PENDING_KEY = 'sk8_pending_ops_v1';
+const CACHE_KEY = 'sk8_cached_state_v2';
+const PENDING_KEY = 'sk8_pending_ops_v2';
 
 export function isLocalOnlyMode() {
   try {
@@ -73,6 +74,9 @@ export function queuePendingOp(opRecord) {
     if (opRecord.op === 'setRain') {
       return !(item.op === 'setRain' && item.dateKey === opRecord.dateKey);
     }
+    if (opRecord.op === 'selectNew') {
+      return !(item.op === 'selectNew' && item.dateKey === opRecord.dateKey);
+    }
     return true;
   });
   ops.push(opRecord);
@@ -92,6 +96,8 @@ export function replayPendingOps(baseState, ops) {
       ).state;
     } else if (item.op === 'setRain') {
       state = setRainRest(state, Boolean(item.value), item.dateKey).state;
+    } else if (item.op === 'selectNew') {
+      state = setTodayNewSelection(state, item.ids || [], item.dateKey);
     }
   }
   return state;

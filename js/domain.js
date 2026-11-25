@@ -5,12 +5,23 @@
 import {
   DEFAULT_SETTINGS,
   PRESET_TRICKS,
+  STANCES,
+  STANCE_META,
+  STANCE_ORDER,
   TIER_META,
   TIER_ORDER,
   TIERS,
 } from './presets.js';
 
-export { TIERS, TIER_ORDER, TIER_META, DEFAULT_SETTINGS };
+export {
+  TIERS,
+  TIER_ORDER,
+  TIER_META,
+  STANCES,
+  STANCE_ORDER,
+  STANCE_META,
+  DEFAULT_SETTINGS,
+};
 
 export function cloneState(state) {
   if (typeof structuredClone === 'function') {
@@ -63,7 +74,6 @@ export function prevDayKey(key) {
 export function getMonthCalendarGrid(year, month1Based) {
   const firstDay = new Date(year, month1Based - 1, 1, 12, 0, 0, 0);
   const daysInMonth = new Date(year, month1Based, 0, 12, 0, 0, 0).getDate();
-  // Monday-first: Monday=0 .. Sunday=6
   const startOffset = (firstDay.getDay() + 6) % 7;
   const cells = [];
   for (let i = 0; i < startOffset; i += 1) {
@@ -77,6 +87,50 @@ export function getMonthCalendarGrid(year, month1Based) {
     cells.push(null);
   }
   return cells;
+}
+
+export function inferStanceFromName(name) {
+  const s = String(name || '').toLowerCase();
+  if (
+    s.includes('nollie') ||
+    s.includes('switch') ||
+    s.includes('反脚') ||
+    s.includes('鼻尖')
+  ) {
+    return STANCES.SWITCH;
+  }
+  if (
+    s.includes('倒滑') ||
+    s.includes('fakie') ||
+    s.includes('half cab') ||
+    s.includes('halfcab') ||
+    s.includes('full cab')
+  ) {
+    return STANCES.FAKIE;
+  }
+  return STANCES.REGULAR;
+}
+
+export function normalizeStance(stance, name = '') {
+  if (STANCE_ORDER.includes(stance)) return stance;
+  return inferStanceFromName(name);
+}
+
+export function groupTricksByStance(tricks) {
+  const groups = [];
+  for (const stanceId of STANCE_ORDER) {
+    const items = tricks.filter(
+      (t) => normalizeStance(t.stance, t.name) === stanceId
+    );
+    if (items.length > 0) {
+      groups.push({
+        stance: stanceId,
+        label: STANCE_META[stanceId].label,
+        items,
+      });
+    }
+  }
+  return groups;
 }
 
 export function clampInt(val, min, max, fallback) {
@@ -158,9 +212,9 @@ export function createInitialState(todayKey = toLocalDateKey()) {
     id: item.id,
     name: item.name,
     tier: item.tier,
+    stance: normalizeStance(item.stance, item.name),
     target: item.target,
     queueOrder: idx + 1,
-    firstLandDate: null,
     totalCompletedCount: 0,
     tierCompletedCount: 0,
     promotionDismissedAtCount: null,
@@ -169,7 +223,7 @@ export function createInitialState(todayKey = toLocalDateKey()) {
   }));
 
   const state = {
-    version: 1,
+    version: 2,
     settings: { ...DEFAULT_SETTINGS },
     tricks,
     dailyLogs: {},
@@ -193,19 +247,17 @@ function getCarryOverNewIds(state, todayKey, newTrickSet) {
     }
   }
 
-  // 首次启动或沿用的新招均已晋级/删除时，默认自动选入前 2 个攻坚新招
-  const firstTwo = state.tricks
+  return state.tricks
     .filter((t) => newTrickSet.has(t.id))
     .slice(0, 2)
     .map((t) => t.id);
-  return firstTwo;
 }
 
-function computeIsFullComplete(tricks, log) {
+function computeIsFullComplete(log) {
   const completedSet = new Set(log.completedIds);
   if (completedSet.size === 0) return false;
 
-  // 熟练老动作为静态展示列表，满勤判定只需勾完今日攻坚新招 + 不稳定老招
+  // 熟练老动作与梦想招式为静态列表，满勤判定只需勾完今日攻坚新招 + 不稳定老招
   const requiredIds = [
     ...log.selectedNewIds,
     ...log.assignedUnstableIds,
@@ -223,6 +275,12 @@ export function reconcileDailyPlan(inputState, todayKey = toLocalDateKey()) {
   if (!state.dailyLogs || typeof state.dailyLogs !== 'object') {
     state.dailyLogs = {};
   }
+
+  // 补齐每个招式的 stance 字段
+  state.tricks = (state.tricks || []).map((t) => ({
+    ...t,
+    stance: normalizeStance(t.stance, t.name),
+  }));
 
   const trickById = new Map(state.tricks.map((t) => [t.id, t]));
   const newTrickIds = new Set(
@@ -253,18 +311,14 @@ export function reconcileDailyPlan(inputState, todayKey = toLocalDateKey()) {
     log.isRainRest = Boolean(log.isRainRest);
   }
 
-  // 清理已失效或已跨分组的 selectedNewIds
   log.selectedNewIds = Array.from(
     new Set(log.selectedNewIds.filter((id) => newTrickIds.has(id)))
   );
-
-  // 清理已删除动作的 completedIds（保留 completedSnapshots 以留存历史显示）
   log.completedIds = Array.from(
     new Set(log.completedIds.filter((id) => trickById.has(id)))
   );
   const completedSet = new Set(log.completedIds);
 
-  // 调和不稳定老招的滚动队列分配
   const quota = state.settings.dailyUnstableCount;
   const existingUnstableAssigned = Array.from(
     new Set(log.assignedUnstableIds.filter((id) => unstableIdSet.has(id)))
@@ -286,7 +340,6 @@ export function reconcileDailyPlan(inputState, todayKey = toLocalDateKey()) {
     remainingSlotsForUncompleted
   );
 
-  // 保持已有条目在今日列表中的相对位置，避免点击勾选时突然跳位
   const keepSet = new Set([...completedAssigned, ...keptUncompleted]);
   const nextAssigned = existingUnstableAssigned.filter((id) => keepSet.has(id));
 
@@ -304,7 +357,7 @@ export function reconcileDailyPlan(inputState, todayKey = toLocalDateKey()) {
   }
 
   log.assignedUnstableIds = nextAssigned;
-  log.isFullComplete = computeIsFullComplete(state.tricks, log);
+  log.isFullComplete = computeIsFullComplete(log);
   return state;
 }
 
@@ -318,7 +371,6 @@ export function setTodayNewSelection(inputState, selectedIds, todayKey = toLocal
   );
   state.dailyLogs[todayKey].selectedNewIds = uniqueValid;
   state.dailyLogs[todayKey].isFullComplete = computeIsFullComplete(
-    state.tricks,
     state.dailyLogs[todayKey]
   );
   return state;
@@ -335,15 +387,14 @@ export function toggleTrickCompletion(inputState, trickId, todayKey = toLocalDat
   const idx = log.completedIds.indexOf(trickId);
 
   if (idx === -1) {
-    // 打卡勾选
     const prevQueueOrder = trick.queueOrder;
     const prevLastPracticed = trick.lastPracticedDate;
-    let firstLandRecorded = false;
 
     log.completedIds.push(trickId);
     log.completedSnapshots[trickId] = {
       name: trick.name,
       tier: trick.tier,
+      stance: trick.stance,
       target: trick.target,
     };
     log.isRainRest = false;
@@ -352,22 +403,16 @@ export function toggleTrickCompletion(inputState, trickId, todayKey = toLocalDat
     trick.tierCompletedCount = (trick.tierCompletedCount || 0) + 1;
     trick.lastPracticedDate = todayKey;
 
-    if (!trick.firstLandDate) {
-      trick.firstLandDate = todayKey;
-      firstLandRecorded = true;
-    }
-
     if (trick.tier === TIERS.UNSTABLE) {
       trick.queueOrder = getMaxQueueOrder(state.tricks) + 1;
     }
 
     log.preCompleteMeta[trickId] = {
       queueOrder: prevQueueOrder,
-      firstLandAutoSet: firstLandRecorded,
       prevLastPracticedDate: prevLastPracticed,
     };
 
-    log.isFullComplete = computeIsFullComplete(state.tricks, log);
+    log.isFullComplete = computeIsFullComplete(log);
     const promotionEligible = getPendingPromotion(state);
 
     return {
@@ -376,14 +421,11 @@ export function toggleTrickCompletion(inputState, trickId, todayKey = toLocalDat
         action: 'checked',
         trickId,
         trickName: trick.name,
-        firstLandRecorded,
-        firstLandDate: trick.firstLandDate,
         promotionEligible,
       },
     };
   }
 
-  // 取消勾选（防误触回退）
   log.completedIds.splice(idx, 1);
   delete log.completedSnapshots[trickId];
 
@@ -392,9 +434,6 @@ export function toggleTrickCompletion(inputState, trickId, todayKey = toLocalDat
 
   const meta = log.preCompleteMeta[trickId];
   if (meta) {
-    if (meta.firstLandAutoSet && trick.totalCompletedCount === 0) {
-      trick.firstLandDate = null;
-    }
     if (trick.tier === TIERS.UNSTABLE && typeof meta.queueOrder === 'number') {
       trick.queueOrder = meta.queueOrder;
     }
@@ -402,8 +441,6 @@ export function toggleTrickCompletion(inputState, trickId, todayKey = toLocalDat
       trick.lastPracticedDate = meta.prevLastPracticedDate;
     }
     delete log.preCompleteMeta[trickId];
-  } else if (trick.firstLandDate === todayKey && trick.totalCompletedCount === 0) {
-    trick.firstLandDate = null;
   }
 
   if (
@@ -413,7 +450,7 @@ export function toggleTrickCompletion(inputState, trickId, todayKey = toLocalDat
     trick.promotionDismissedAtCount = null;
   }
 
-  log.isFullComplete = computeIsFullComplete(state.tricks, log);
+  log.isFullComplete = computeIsFullComplete(log);
 
   return {
     state,
@@ -507,7 +544,12 @@ export function acceptPromotion(inputState, trickId, todayKey = toLocalDateKey()
   const trick = state.tricks.find((t) => t.id === trickId);
   if (!trick) return reconcileDailyPlan(state, todayKey);
 
-  if (trick.tier === TIERS.NEW) {
+  if (trick.tier === TIERS.DREAM) {
+    trick.tier = TIERS.NEW;
+    trick.tierCompletedCount = 0;
+    trick.promotionDismissedAtCount = null;
+    trick.target = TIER_META[TIERS.NEW].defaultTarget;
+  } else if (trick.tier === TIERS.NEW) {
     trick.tier = TIERS.UNSTABLE;
     trick.tierCompletedCount = 0;
     trick.promotionDismissedAtCount = null;
@@ -519,7 +561,9 @@ export function acceptPromotion(inputState, trickId, todayKey = toLocalDateKey()
     trick.tier = TIERS.MASTERED;
     trick.tierCompletedCount = 0;
     trick.promotionDismissedAtCount = null;
-    if (/^连成\s*\d+\s*次$/.test((trick.target || '').trim())) {
+    if (
+      /^(出一遍|连成\s*\d+\s*次)$/.test((trick.target || '').trim())
+    ) {
       trick.target = TIER_META[TIERS.MASTERED].defaultTarget;
     }
   }
@@ -543,19 +587,17 @@ export function addTrick(inputState, payload, todayKey = toLocalDateKey()) {
     throw new Error('招式名称不能为空');
   }
   const tier = TIER_ORDER.includes(payload?.tier) ? payload.tier : TIERS.NEW;
+  const stance = normalizeStance(payload?.stance, name);
   const target =
     String(payload?.target || '').trim() || TIER_META[tier].defaultTarget;
-  const firstLandDate = isValidDateKey(payload?.firstLandDate)
-    ? payload.firstLandDate
-    : null;
 
   const trick = {
     id: createTrickId(),
     name,
     tier,
+    stance,
     target,
     queueOrder: getMaxQueueOrder(state.tricks) + 1,
-    firstLandDate,
     totalCompletedCount: 0,
     tierCompletedCount: 0,
     promotionDismissedAtCount: null,
@@ -581,6 +623,10 @@ export function updateTrick(inputState, trickId, patch, todayKey = toLocalDateKe
     trick.name = trimmed;
   }
 
+  if (patch.stance && STANCE_ORDER.includes(patch.stance)) {
+    trick.stance = patch.stance;
+  }
+
   const oldTier = trick.tier;
   if (patch.tier && TIER_ORDER.includes(patch.tier) && patch.tier !== oldTier) {
     trick.tier = patch.tier;
@@ -601,14 +647,6 @@ export function updateTrick(inputState, trickId, patch, todayKey = toLocalDateKe
   if (typeof patch.target === 'string') {
     const t = patch.target.trim();
     trick.target = t || TIER_META[trick.tier].defaultTarget;
-  }
-
-  if ('firstLandDate' in patch) {
-    if (!patch.firstLandDate) {
-      trick.firstLandDate = null;
-    } else if (isValidDateKey(patch.firstLandDate)) {
-      trick.firstLandDate = patch.firstLandDate;
-    }
   }
 
   return reconcileDailyPlan(state, todayKey);
@@ -674,7 +712,7 @@ export function computeStreak(state, todayKey = toLocalDateKey()) {
     if (status === 'full' || status === 'partial') {
       streak += 1;
     } else if (status === 'rain') {
-      // 下雨休板日只桥接不断签，也不额外增加天数
+      // 下雨休板日桥接不断签
     } else {
       break;
     }
@@ -715,7 +753,7 @@ export function getDaySummary(state, dateKey) {
 export function exportBackupPayload(state, now = new Date()) {
   return {
     app: 'SK8',
-    schemaVersion: 1,
+    schemaVersion: 2,
     exportedAt: now.toISOString(),
     data: cloneState(state),
   };
@@ -763,14 +801,12 @@ export function parseAndValidateBackup(rawText, todayKey = toLocalDateKey()) {
       id,
       name,
       tier,
+      stance: normalizeStance(rawTrick.stance, name),
       target,
       queueOrder:
         typeof rawTrick.queueOrder === 'number' && Number.isFinite(rawTrick.queueOrder)
           ? rawTrick.queueOrder
           : idx + 1,
-      firstLandDate: isValidDateKey(rawTrick.firstLandDate)
-        ? rawTrick.firstLandDate
-        : null,
       totalCompletedCount: clampInt(rawTrick.totalCompletedCount, 0, 999999, 0),
       tierCompletedCount: clampInt(rawTrick.tierCompletedCount, 0, 999999, 0),
       promotionDismissedAtCount:
@@ -817,7 +853,7 @@ export function parseAndValidateBackup(rawText, todayKey = toLocalDateKey()) {
   }
 
   const nextState = {
-    version: 1,
+    version: 2,
     settings: sanitizeSettings(candidate.settings || {}),
     tricks: normalizedTricks,
     dailyLogs: normalizedLogs,
@@ -893,21 +929,23 @@ export function renderMarkdownLog(inputState, todayKey = toLocalDateKey()) {
   } else {
     for (const t of newList) {
       const box = completedSet.has(t.id) ? '[x]' : '[ ]';
-      const land = t.firstLandDate ? ` · 首成 ${t.firstLandDate}` : '';
-      lines.push(`- ${box} ${t.name}（${t.target}${land}）`);
+      lines.push(`- ${box} ${t.name}（${t.target}）`);
     }
   }
 
-  lines.push('', `## 今日不稳定老招（每日 ${state.settings.dailyUnstableCount} 个滚动）`);
+  lines.push('', `## 今日不稳定老招（每日 ${state.settings.dailyUnstableCount} 个）`);
   const unstableList = log.assignedUnstableIds
     .map((id) => trickById.get(id))
     .filter(Boolean);
   if (unstableList.length === 0) {
     lines.push('- （暂无）');
   } else {
-    for (const t of unstableList) {
-      const box = completedSet.has(t.id) ? '[x]' : '[ ]';
-      lines.push(`- ${box} ${t.name}（${t.target}）`);
+    for (const grp of groupTricksByStance(unstableList)) {
+      lines.push(`### ${grp.label}`);
+      for (const t of grp.items) {
+        const box = completedSet.has(t.id) ? '[x]' : '[ ]';
+        lines.push(`- ${box} ${t.name}（${t.target}）`);
+      }
     }
   }
 
@@ -916,8 +954,18 @@ export function renderMarkdownLog(inputState, todayKey = toLocalDateKey()) {
   if (masteredList.length === 0) {
     lines.push('- （暂无）');
   } else {
-    for (const t of masteredList) {
-      lines.push(`- ${t.name}`);
+    for (const grp of groupTricksByStance(masteredList)) {
+      lines.push(`- **${grp.label}**：${grp.items.map((t) => t.name).join('、')}`);
+    }
+  }
+
+  lines.push('', '## 梦想招式');
+  const dreamList = state.tricks.filter((t) => t.tier === TIERS.DREAM);
+  if (dreamList.length === 0) {
+    lines.push('- （暂无）');
+  } else {
+    for (const grp of groupTricksByStance(dreamList)) {
+      lines.push(`- **${grp.label}**：${grp.items.map((t) => t.name).join('、')}`);
     }
   }
 
@@ -925,9 +973,8 @@ export function renderMarkdownLog(inputState, todayKey = toLocalDateKey()) {
   for (const tier of TIER_ORDER) {
     const group = state.tricks.filter((t) => t.tier === tier);
     lines.push(`### ${TIER_META[tier].label}（${group.length}）`);
-    for (const t of group) {
-      const land = t.firstLandDate ? ` · 首成 ${t.firstLandDate}` : '';
-      lines.push(`- ${t.name}｜${t.target}｜累计 ${t.totalCompletedCount || 0} 次${land}`);
+    for (const sg of groupTricksByStance(group)) {
+      lines.push(`- **${sg.label}**：${sg.items.map((t) => `${t.name}（${t.target}）`).join('、')}`);
     }
     lines.push('');
   }

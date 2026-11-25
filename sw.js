@@ -1,4 +1,4 @@
-const CACHE_NAME = 'sk8-v3';
+const CACHE_NAME = 'sk8-v4';
 
 const PRECACHE_URLS = [
   './',

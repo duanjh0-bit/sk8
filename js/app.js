@@ -1,4 +1,5 @@
 import {
+  STANCE_META,
   TIERS,
   TIER_META,
   TIER_ORDER,
@@ -9,7 +10,10 @@ import {
   getDayStatus,
   getDaySummary,
   getMonthCalendarGrid,
+  groupTricksByStance,
+  normalizeStance,
   reconcileDailyPlan,
+  setTodayNewSelection,
   toggleRainRest,
   toggleTrickCompletion,
   toLocalDateKey,
@@ -27,7 +31,10 @@ const ui = {
   calYear: new Date().getFullYear(),
   calMonth: new Date().getMonth() + 1,
   selectedDateKey: toLocalDateKey(),
-  state: reconcileDailyPlan(loadCachedState() || createInitialState(toLocalDateKey()), toLocalDateKey()),
+  state: reconcileDailyPlan(
+    loadCachedState() || createInitialState(toLocalDateKey()),
+    toLocalDateKey()
+  ),
   busy: false,
   syncStatus: '',
 };
@@ -37,6 +44,9 @@ const dom = {
   segmentedBar: document.getElementById('segmentedBar'),
   mainContent: document.getElementById('mainContent'),
   statusBar: document.getElementById('statusBar'),
+  pickerModal: document.getElementById('pickerModal'),
+  pickerCloseBtn: document.getElementById('pickerCloseBtn'),
+  pickerBody: document.getElementById('pickerBody'),
 };
 
 function escapeHtml(str) {
@@ -98,10 +108,11 @@ function renderSegmented() {
   });
 }
 
-function renderRow(trick, completedSet) {
+function renderCheckRow(trick, completedSet, showStanceBadge = false) {
   const isDone = completedSet.has(trick.id);
-  const firstLand = trick.firstLandDate
-    ? `<span class="mini-tag first-land">首成 ${escapeHtml(trick.firstLandDate.slice(5))}</span>`
+  const stanceId = normalizeStance(trick.stance, trick.name);
+  const stanceTag = showStanceBadge
+    ? `<span class="stance-pill">${escapeHtml(STANCE_META[stanceId].label)}</span>`
     : '';
 
   return `
@@ -115,10 +126,51 @@ function renderRow(trick, completedSet) {
         <span class="trick-name">${escapeHtml(trick.name)}</span>
         <span class="trick-meta-row">
           <span class="target-badge ${trick.tier}">${escapeHtml(trick.target)}</span>
-          ${firstLand}
+          ${stanceTag}
         </span>
       </span>
     </button>
+  `;
+}
+
+function renderGroupedCheckList(tricks, completedSet) {
+  const groups = groupTricksByStance(tricks);
+  return `
+    <div class="card-list">
+      ${groups
+        .map(
+          (g) => `
+          <div class="stance-divider">${escapeHtml(g.label)}</div>
+          ${g.items.map((t) => renderCheckRow(t, completedSet, false)).join('')}
+        `
+        )
+        .join('')}
+    </div>
+  `;
+}
+
+function renderStaticStanceCard(tricks, chipVariant) {
+  const groups = groupTricksByStance(tricks);
+  return `
+    <div class="card-panel static-panel" aria-readonly="true">
+      ${groups
+        .map(
+          (g) => `
+          <div class="static-stance-group">
+            <div class="static-stance-label">${escapeHtml(g.label)}</div>
+            <div class="static-chip-list">
+              ${g.items
+                .map(
+                  (t) =>
+                    `<span class="static-chip ${chipVariant}">${escapeHtml(t.name)}</span>`
+                )
+                .join('')}
+            </div>
+          </div>
+        `
+        )
+        .join('')}
+    </div>
   `;
 }
 
@@ -136,36 +188,42 @@ function renderTodayView() {
   const masteredTricks = ui.state.tricks.filter(
     (t) => t.tier === TIERS.MASTERED
   );
+  const dreamTricks = ui.state.tricks.filter(
+    (t) => t.tier === TIERS.DREAM
+  );
 
   const newDone = newTricks.filter((t) => completedSet.has(t.id)).length;
   const unstableDone = unstableTricks.filter((t) => completedSet.has(t.id)).length;
 
   const newHtml =
     newTricks.length > 0
-      ? `<div class="card-list">${newTricks.map((t) => renderRow(t, completedSet)).join('')}</div>`
-      : `<div class="empty-card">暂无攻坚新招</div>`;
+      ? `<div class="card-list">${newTricks.map((t) => renderCheckRow(t, completedSet, true)).join('')}</div>`
+      : `<button type="button" id="emptyPickBtn" class="empty-card empty-btn">+ 选择今日攻坚新招</button>`;
 
   const unstableHtml =
     unstableTricks.length > 0
-      ? `<div class="card-list">${unstableTricks.map((t) => renderRow(t, completedSet)).join('')}</div>`
+      ? renderGroupedCheckList(unstableTricks, completedSet)
       : `<div class="empty-card">暂无不稳定老招</div>`;
 
   const masteredHtml =
     masteredTricks.length > 0
-      ? `<div class="card-panel mastered-static-card"><div class="mastered-chip-list">${masteredTricks
-          .map(
-            (t) =>
-              `<span class="mastered-static-chip">${escapeHtml(t.name)}</span>`
-          )
-          .join('')}</div></div>`
+      ? renderStaticStanceCard(masteredTricks, 'mastered')
       : `<div class="empty-card">暂无熟练老动作</div>`;
+
+  const dreamHtml =
+    dreamTricks.length > 0
+      ? renderStaticStanceCard(dreamTricks, 'dream')
+      : `<div class="empty-card">暂无梦想招式</div>`;
 
   dom.mainContent.innerHTML = `
     <section class="section-block">
-      <div class="section-header">
-        <span class="tier-dot new"></span>
-        <h2 class="section-title">攻坚新招</h2>
-        <span class="section-count">${newDone}/${newTricks.length}</span>
+      <div class="section-header-row">
+        <div class="section-header">
+          <span class="tier-dot new"></span>
+          <h2 class="section-title">攻坚新招</h2>
+          <span class="section-count">${newDone}/${newTricks.length}</span>
+        </div>
+        <button type="button" id="openPickerBtn" class="pick-btn">选招</button>
       </div>
       ${newHtml}
     </section>
@@ -187,7 +245,19 @@ function renderTodayView() {
       </div>
       ${masteredHtml}
     </section>
+
+    <section class="section-block">
+      <div class="section-header">
+        <span class="tier-dot dream"></span>
+        <h2 class="section-title">梦想招式</h2>
+        <span class="section-count">${dreamTricks.length}</span>
+      </div>
+      ${dreamHtml}
+    </section>
   `;
+
+  document.getElementById('openPickerBtn')?.addEventListener('click', openPickerModal);
+  document.getElementById('emptyPickBtn')?.addEventListener('click', openPickerModal);
 
   dom.mainContent.querySelectorAll('[data-toggle-id]').forEach((btn) => {
     btn.onclick = () => handleToggle(btn.getAttribute('data-toggle-id'));
@@ -239,6 +309,7 @@ function renderHistoryView() {
   const librarySections = TIER_ORDER.map((tier) => {
     const items = ui.state.tricks.filter((t) => t.tier === tier);
     if (items.length === 0) return '';
+    const groups = groupTricksByStance(items);
     return `
       <div class="lib-group">
         <div class="section-header">
@@ -247,20 +318,20 @@ function renderHistoryView() {
           <span class="section-count">${items.length}</span>
         </div>
         <div class="card-list">
-          ${items
+          ${groups
             .map(
-              (t) => `
-              <div class="lib-row">
-                <span class="lib-name">${escapeHtml(t.name)}</span>
-                <span class="lib-right">
-                  ${
-                    t.firstLandDate
-                      ? `<span class="mini-tag first-land">首成 ${escapeHtml(t.firstLandDate)}</span>`
-                      : ''
-                  }
-                  <span class="target-badge ${t.tier}">${escapeHtml(t.target)}</span>
-                </span>
-              </div>
+              (g) => `
+              <div class="stance-divider">${escapeHtml(g.label)}</div>
+              ${g.items
+                .map(
+                  (t) => `
+                  <div class="lib-row">
+                    <span class="lib-name">${escapeHtml(t.name)}</span>
+                    <span class="target-badge ${t.tier}">${escapeHtml(t.target)}</span>
+                  </div>
+                `
+                )
+                .join('')}
             `
             )
             .join('')}
@@ -323,6 +394,103 @@ function render() {
   renderStatus();
 }
 
+/* ---------------- 今日攻坚选招弹窗 ---------------- */
+
+function openPickerModal() {
+  renderPickerBody();
+  dom.pickerModal.hidden = false;
+}
+
+function closePickerModal() {
+  dom.pickerModal.hidden = true;
+}
+
+function renderPickerBody() {
+  const newTricks = ui.state.tricks.filter((t) => t.tier === TIERS.NEW);
+  const selectedSet = new Set(
+    ui.state.dailyLogs[ui.todayKey]?.selectedNewIds || []
+  );
+
+  if (newTricks.length === 0) {
+    dom.pickerBody.innerHTML = `
+      <div class="empty-card">暂无攻坚新招</div>
+      <button type="button" id="pickerDoneBtn" class="picker-done-btn">完成</button>
+    `;
+    document.getElementById('pickerDoneBtn').onclick = closePickerModal;
+    return;
+  }
+
+  const groups = groupTricksByStance(newTricks);
+  const listHtml = groups
+    .map(
+      (g) => `
+      <div class="stance-divider">${escapeHtml(g.label)}</div>
+      ${g.items
+        .map((t) => {
+          const selected = selectedSet.has(t.id);
+          return `
+            <button
+              type="button"
+              class="picker-row ${selected ? 'is-selected' : ''}"
+              data-pick-id="${escapeHtml(t.id)}"
+            >
+              <span class="picker-left">
+                <span class="picker-box">${selected ? checkIconSvg() : ''}</span>
+                <span class="picker-name">${escapeHtml(t.name)}</span>
+              </span>
+              <span class="target-badge new">${escapeHtml(t.target)}</span>
+            </button>
+          `;
+        })
+        .join('')}
+    `
+    )
+    .join('');
+
+  dom.pickerBody.innerHTML = `
+    <div class="picker-list">${listHtml}</div>
+    <button type="button" id="pickerDoneBtn" class="picker-done-btn">完成（已选 ${selectedSet.size} 招）</button>
+  `;
+
+  dom.pickerBody.querySelectorAll('[data-pick-id]').forEach((row) => {
+    row.onclick = () => handleTogglePickNew(row.getAttribute('data-pick-id'));
+  });
+  document.getElementById('pickerDoneBtn').onclick = closePickerModal;
+}
+
+async function handleTogglePickNew(trickId) {
+  if (ui.busy) return;
+  ui.busy = true;
+
+  const cur = new Set(ui.state.dailyLogs[ui.todayKey]?.selectedNewIds || []);
+  if (cur.has(trickId)) {
+    cur.delete(trickId);
+  } else {
+    cur.add(trickId);
+  }
+  const nextIds = Array.from(cur);
+  const optimistic = setTodayNewSelection(ui.state, nextIds, ui.todayKey);
+
+  ui.state = optimistic;
+  ui.syncStatus = '同步中…';
+  renderPickerBody();
+  render();
+
+  const res = await syncPushOp(
+    optimistic,
+    { op: 'selectNew', dateKey: ui.todayKey, ids: nextIds },
+    ui.todayKey
+  );
+
+  ui.state = res.state;
+  ui.syncStatus = res.synced
+    ? ''
+    : `离线已暂存（待同步 ${res.pendingCount}）`;
+  ui.busy = false;
+  if (!dom.pickerModal.hidden) renderPickerBody();
+  render();
+}
+
 function shiftMonth(delta) {
   let m = ui.calMonth + delta;
   let y = ui.calYear;
@@ -364,13 +532,9 @@ async function handleToggle(trickId) {
   );
 
   ui.state = res.state;
-  if (res.synced) {
-    ui.syncStatus = event.firstLandRecorded
-      ? `首成记录 ${event.firstLandDate}`
-      : '';
-  } else {
-    ui.syncStatus = `离线已暂存（待同步 ${res.pendingCount}）`;
-  }
+  ui.syncStatus = res.synced
+    ? ''
+    : `离线已暂存（待同步 ${res.pendingCount}）`;
   ui.busy = false;
   render();
 }
@@ -431,6 +595,11 @@ async function handleRefresh(silent = false) {
   if (refreshBtn) refreshBtn.classList.remove('spinning');
   render();
 }
+
+dom.pickerCloseBtn.onclick = closePickerModal;
+dom.pickerModal.onclick = (e) => {
+  if (e.target === dom.pickerModal) closePickerModal();
+};
 
 if ('serviceWorker' in navigator) {
   navigator.serviceWorker.register('./sw.js').catch(() => {});
