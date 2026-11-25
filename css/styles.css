@@ -348,48 +348,28 @@ button {
   color: var(--green-text);
 }
 
-/* 熟练老动作 2 列快刷 */
-.mastered-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+/* 熟练老动作静态列表 */
+.mastered-static-card {
+  padding: 12px 14px;
+}
+
+.mastered-chip-list {
+  display: flex;
+  flex-wrap: wrap;
   gap: 8px;
 }
 
-.mastered-tile {
-  background-color: var(--bg-card);
-  border: 1px solid var(--border);
-  border-radius: 14px;
-  min-height: 54px;
-  padding: 10px 12px;
-  display: flex;
+.mastered-static-chip {
+  display: inline-flex;
   align-items: center;
-  gap: 10px;
-  text-align: left;
-  box-shadow: var(--shadow-card);
-  transition: all 0.15s ease;
-}
-
-.mastered-tile.is-done {
+  padding: 6px 12px;
+  border-radius: 10px;
   background-color: var(--green-bg);
-  border-color: var(--green-border);
-}
-
-.mastered-tile .check-circle {
-  width: 24px;
-  height: 24px;
-}
-
-.mastered-name {
-  font-size: 15px;
-  font-weight: 700;
-  color: var(--ink);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.mastered-tile.is-done .mastered-name {
+  border: 1px solid var(--green-border);
   color: var(--green-text);
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 1.3;
 }
 
 /* 日历与只读招式列表 */
